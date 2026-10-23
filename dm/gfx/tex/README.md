@@ -15,13 +15,21 @@ Block linear is how the Tegra X1 GPU stores textures: the data is not one row af
 | `nvn_fmt_mtl.h`, `nvn_fmt_mtl.c` | `nvn_fmt_to_mtl()`: NVN format (0x01–0x9C) → Metal pixel format + component remapping. Returns 1 for an exact match, 2 for a substitute (precision, bit order or interpretation differs and a conversion is needed), 0 when Metal has no corresponding format. How each format is handled is written in the comments inside the table. Pure C, no dependency on Metal headers |
 | `nvn_deswizzle.h`, `nvn_deswizzle.c` | `nvn_deswizzle()`: deswizzles one level and one layer from block linear to linear; `nvn_swizzle()`: the reverse, used for round trips in unit tests; `nvn_bl_offset()`: the block-linear address of a single point. Pure C |
 | `nvn_deswizzle_gpu.h`, `nvn_deswizzle_gpu.m` | A Metal compute shader version of the same deswizzling algorithm, used by the replay layer when uploading packaged textures; when initialization fails or an unsupported format is encountered, the replay layer falls back to the CPU version |
+| `nvn_bcdec.h`, `nvn_bcdec.c` | `nvn_bc_unpacked()` / `nvn_bc_decode()`: decompress BC textures on the CPU into uncompressed formats; `nvn_bc_astc()` / `nvn_bc_to_astc()`: re-encode BC7 to ASTC 4x4 on the CPU, spread over the cores. Decoding uses `dm/third_party/bcdec` |
+| `nvn_astcenc.h`, `nvn_astcenc.c` | `astc_enc4x4()`: a small real-time ASTC 4x4 LDR encoder (one partition, 8-bit endpoints, 3-bit weights for opaque blocks and 2-bit with alpha), about 35 dB against BC7's decoded texels. Pure C |
 | `tests/` | Unit tests |
 
 The offsets of each level and layer within the storage, and the block height and block depth actually used by each level, are all taken from `../nvn/nvn_tex.c` (`nvn_tex_layout`, `nvn_tex_level_offset`, `nvn_tex_level_tiles`); this directory only does addressing and moving within a level. The game's packaged textures carry their own layout parameters, whose byte 0 is the log2 of the level 0 block height; when it is present it takes precedence (the `pkg_block_h` field of `nvn_texdesc`).
 
-## BC textures
+## Devices without BC support
 
-Only GPUs with BC compressed textures are supported (`supportsBCTextureCompression` of `MTLDevice`: Apple silicon Macs and the latest iPhones), so BC textures are created and uploaded as BC; there is no decompression path. A BC texture is never a render target and its raw blocks are not sampled through an uncompressed view (Metal has no such views; Breath of the Wild encodes one 32×32 BC4 texture on the GPU, GitHub issue #4).
+Some older Apple GPUs do not support BC compressed textures (determined by `supportsBCTextureCompression` of `MTLDevice`). On these devices:
+
+- BC7, the bulk of most games' textures, is re-encoded to ASTC 4x4 at upload and in buffer→texture copies (`nvn_bc_to_astc`). Every Apple GPU samples ASTC, and an ASTC 4x4 block is the same 16 bytes as a BC7 block, so these textures cost what they cost with BC. `DM_BC_ASTC=0` decompresses BC7 instead;
+- the other BC formats are created in their decompressed format and decompressed at upload: BC1–5 on the GPU (the `bcd` kernel in `../nvn/nvn_mtl.m`), BC6H and 3D textures on the CPU through `nvn_bcdec.c`. They take 2–8 times the memory, so on iOS the top levels of large mipmapped ones are dropped until the longer side is at most `DM_BC_MAX` (default 1024 on iOS, 0 = off): sampling is unchanged, the texture is just less sharp up close;
+- a BC texture is never a render target and its raw blocks are not sampled through an uncompressed view, with or without BC (Metal has no such views; Breath of the Wild encodes one 32×32 BC4 texture on the GPU, GitHub issue #4).
+
+The environment variable `DM_TEST_NO_BC=1` forces this path on any machine. Measured on Chocobo GP (Unreal Engine 4.26, iPhone 13 Pro Max / A15, without the increased-memory-limit entitlement): a race at 2.2–2.5 GB instead of being killed at 3.06 GB entering the menus with everything decompressed.
 
 ## Tests
 
